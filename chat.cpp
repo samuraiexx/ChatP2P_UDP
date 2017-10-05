@@ -8,80 +8,112 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <thread>
-#include <set>
 #include <iomanip>
 #include <sstream>
+#include <mutex>
+#include <queue>
 
 using namespace std;
 
 #define BUFFERSIZE 2048
 
-class client{
-    char buffer[BUFFERSIZE];
-    int fd;
-    struct sockaddr_in myAddr, recAddr, clAddr;
-    int i;
-    set<string> not_received;
-    
-    string to_hex_string( const unsigned int i ) {
-        std::stringstream s;
-        s << "0x" << setfill('0') << setw(2) << hex << i;
-        return s.str();
-    }
-    
-public:
-    client(int port, string ip) {
-        i = 1;
-        if((fd = socket(AF_INET, SOCK_DGRAM, 0)) < 0)
-            throw string("Socket creation failed");
-        memset(&myAddr, 0, sizeof(myAddr));
-        myAddr.sin_family = AF_INET;
-        myAddr.sin_port = htons(0);
-        myAddr.sin_addr.s_addr = htonl(INADDR_ANY);
+string to_hex_string( const unsigned int i ) {
+    std::stringstream s;
+    s << "0x" << setfill('0') << setw(2) << hex << i;
+    return s.str();
+}
 
-        if(bind(fd, (struct sockaddr*) &myAddr, sizeof(myAddr)) < 0)
+class Chat{
+    char buffer[BUFFERSIZE];
+    int send_s, receive_s; //socket for send and receive
+    int local_port, remote_port; // receive and send ports
+    struct sockaddr_in localAddr, remoteAddr, fromAddr;
+    int count;
+    bool on;
+    socklen_t addr_size;
+    mutex qMu;
+    string last_confirmed;
+    queue<pair<string, bool>> queued_msgs; // true for messages false for confirmations
+
+    public:
+    Chat(int local_port, int remote_port, string ip) {
+        count = 0;
+        on = true;
+        addr_size = sizeof(fromAddr);
+
+        this->local_port = local_port;
+        this->remote_port = remote_port;
+        if((send_s = socket(AF_INET, SOCK_DGRAM, 0)) < 0)
+            throw string("Socket creation failed");
+
+        memset(&localAddr, 0, sizeof(localAddr));
+        localAddr.sin_family = AF_INET;
+        localAddr.sin_port = htons(0);
+        localAddr.sin_addr.s_addr = htonl(INADDR_ANY);
+        if(bind(send_s, (struct sockaddr*) &localAddr, sizeof(localAddr)) < 0)
             throw string("Bind failed");
 
-        memset(&recAddr, 0, sizeof(myAddr));
-        recAddr.sin_family = AF_INET;
-        recAddr.sin_port = htons(port);
+        memset(&remoteAddr, 0, sizeof(remoteAddr));
+        remoteAddr.sin_family = AF_INET;
+        remoteAddr.sin_port = htons(remote_port);
 
-        if(inet_pton(AF_INET, ip.c_str(), &recAddr.sin_addr) <= 0)
+        if(inet_pton(AF_INET, ip.c_str(), &remoteAddr.sin_addr) <= 0)
             throw "Invalid Adress";
     }
-    void sendThread(string id, string message) {
-        while(not_received.count(id)){
-            int status = sendto(fd, (id + ' ' + message).c_str(), message.size() + 1, 0, 
-                         (struct sockaddr*) &recAddr, sizeof(recAddr));
-            if(status < 0)
-                throw string("Send failed");
+
+    void server_thread(){
+        while(on){
+            recvfrom(receive_s, buffer, BUFFERSIZE, 0, (struct sockaddr*)&fromAddr, &addr_size);
+            string msg(buffer);
+            string pkt = msg.substr(0, 4);
+            msg = msg.substr(5);
+            
+            if(pkt.compare(to_hex_string(0)) == 0) //confirmation message, update last packet received
+                last_confirmed = msg;
+            else {
+                cout << "Menssagem:: " << msg << endl;
+                unique_lock<mutex> locker(qMu);
+                queued_msgs.push({to_hex_string(0) + pkt, 0});
+                locker.unlock();
+            }
+
         }
     }
-    
-    void send(string message) {
-        string id = to_hex_string(i++);
-        not_received.insert(id);
-        thread(sendThread, id, message);
+
+    void client_thread(){
+        while(on) if(queued_msgs.size()) {
+                unique_lock<mutex> locker(qMu);
+                string msg = queued_msgs.front().first;
+                bool type = queued_msgs.front().second; queued_msgs.pop();
+                locker.unlock();
+
+                if(type){ //if its a message, not a confirmation
+                    string pkt = to_hex_string(++count);
+                    string msg = pkt + msg;
+                    while(last_confirmed.compare(pkt) != 0)
+                        sendto(send_s, msg.c_str(), msg.size() + 1, 0,
+                                (struct sockaddr*) &remoteAddr, sizeof(remoteAddr));
+                } else { //its is a confirmation
+                    string pkt = to_hex_string(0);
+                    string msg = pkt + msg;
+                    sendto(send_s, msg.c_str(), msg.size() + 1, 0,
+                            (struct sockaddr*) &remoteAddr, sizeof(remoteAddr));
+                }
+            }
     }
 
-    string receive(){
-        socklen_t addr_size = sizeof(clAddr);
-        recvfrom(fd, buffer, BUFFERSIZE, 0, (struct sockaddr*)&clAddr, &addr_size);
-        not_received.erase(string(buffer).substr(5));
+    void send(string msg) {
+        lock_guard<mutex> locker(qMu);
+        queued_msgs.push({msg, true});
     }
+    
+    void turn_off() { on = false; }
 };
 
 int main(){
-    int port;
-    string ip;
-    cin >> port >> ip;
     try{
-        client c = client(port, ip);
-        while(1){
-            c.send("oi");
-            cout << c.receive() << endl;
-        }
-        
+        Chat chat(2222, 2223, "127.0.0.1");
+        chat.send("oi");
     }catch(string s){
         cout << s << endl;
     }
