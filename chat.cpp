@@ -34,7 +34,7 @@ class Chat{
     mutex qMu;
     string last_confirmed;
     priority_queue<string, vector<string>, greater<string>> queued_msgs; // true for messages false for confirmations
-    set<string> readed;
+    string last_readed;
 
     public:
     Chat(int local_port, int remote_port, string ip) {
@@ -75,7 +75,7 @@ class Chat{
             if(pkt.compare(to_hex_string(0)) == 0) //confirmation message, update last packet received
                 last_confirmed = msg;
             else {
-                if(!readed.count(pkt)) cout << "\t\t\t\t" << msg << endl, readed.insert(pkt);
+                if(pkt.compare(last_readed)) cout << "\t\t\t\t\t" << msg << endl, last_readed = pkt;
                 unique_lock<mutex> locker(qMu);
                 queued_msgs.push(to_hex_string(0) + pkt);
                 locker.unlock();
@@ -109,6 +109,8 @@ class Chat{
     }
 
     void send(string msg) {
+        while(queued_msgs.size() > 0 && count == 255); //Id reset, must wait the queue
+        if(count == 255) count = 0;
         lock_guard<mutex> locker(qMu);
         queued_msgs.push(to_hex_string(++count) + msg);
     }
