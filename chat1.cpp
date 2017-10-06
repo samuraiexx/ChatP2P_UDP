@@ -119,7 +119,7 @@ class Chat{
 int main(){
     try{
         string msg;
-        Chat chat(2222, 2223, "127.0.0.1");
+        Chat chat(2223, 2222, "127.0.0.1");
         thread client(&Chat::client_thread, &chat);
         thread server(&Chat::server_thread, &chat);
         while(getline(cin, msg), msg.compare("EXIT")) chat.send(msg);
