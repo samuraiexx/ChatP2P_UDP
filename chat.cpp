@@ -13,6 +13,7 @@
 #include <mutex>
 #include <queue>
 #include <unistd.h>
+#include <sys/fcntl.h>
 
 using namespace std;
 
@@ -28,6 +29,7 @@ class ChatHandler{
   mutex qMu;
   priority_queue<string, vector<string>, greater<string>> queued_msgs; // true for messages false for confirmations
   string last_confirmed;
+  bool on;
 
   friend class Client;
   friend class Server;
@@ -39,7 +41,6 @@ class Client{
     int send_s; //socket for send and receive
     struct sockaddr_in localAddr, remoteAddr, fromAddr;
     int count;
-    bool on;
     socklen_t addr_size;
     ChatHandler* handler;
 
@@ -47,7 +48,7 @@ class Client{
     Client(int remote_port, string ip, ChatHandler &chandler){
       handler = &chandler;
       count = 0;
-      on = true;
+      handler->on = true;
       addr_size = sizeof fromAddr;
 
       if((send_s = socket(AF_INET, SOCK_DGRAM, 0)) < 0)
@@ -60,6 +61,9 @@ class Client{
       if(bind(send_s, (struct sockaddr*) &localAddr, sizeof(localAddr)) < 0)
         throw string("Bind failed1");
 
+      if(fcntl(send_s, F_SETFL, O_NONBLOCK) < 0)
+        throw string("Failed to set socket to non-blocking.");
+
       memset(&remoteAddr, 0, sizeof(remoteAddr));
       remoteAddr.sin_family = AF_INET;
       remoteAddr.sin_port = htons(remote_port);
@@ -70,7 +74,7 @@ class Client{
     }
 
     void client_thread(){
-      while(on) if(handler->queued_msgs.size()) {
+      while(handler->on) if(handler->queued_msgs.size()) {
         unique_lock<mutex> locker(handler->qMu);
         string msg = handler->queued_msgs.top(); handler->queued_msgs.pop();
         locker.unlock();
@@ -93,6 +97,9 @@ class Client{
         }
       }
     }
+
+    void turn_off(){ handler->on = false; }
+
     void send(string msg) {
       if(msg == "EXIT")
         throw string("Chat has ended.");
@@ -109,7 +116,6 @@ class Server{
     char buffer[BUFFERSIZE];
     int send_s, receive_s; //socket for send and receive
     struct sockaddr_in localAddr, remoteAddr, fromAddr;
-    bool on;
     socklen_t addr_size;
     string last_readed;
     ChatHandler* handler;
@@ -117,7 +123,7 @@ class Server{
   public:
     Server(int local_port, ChatHandler &chandler){
       handler = &chandler;
-      on = true;
+      handler->on = true;
       addr_size = sizeof fromAddr;
 
       if((receive_s = socket(AF_INET, SOCK_DGRAM, 0)) < 0)
@@ -130,13 +136,16 @@ class Server{
       if(bind(receive_s, (struct sockaddr*) &localAddr, sizeof(localAddr)) < 0)
         throw string("Bind failed4");
 
+      if(fcntl(receive_s, F_SETFL, O_NONBLOCK) < 0)
+        throw string("Failed to set socket to non-blocking.");
+
     }
 
-    void turn_off() { on = false; }
+    void turn_off() { handler->on = false; }
 
     void server_thread(){
-      while(on){
-        recvfrom(receive_s, buffer, BUFFERSIZE, 0, (struct sockaddr*)&fromAddr, &addr_size);
+      while(handler->on){
+        if(recvfrom(receive_s, buffer, BUFFERSIZE, 0, (struct sockaddr*)&fromAddr, &addr_size) < 4) continue;
         string msg(buffer);
         string pkt = msg.substr(0, 4);
         msg = msg.substr(4);
@@ -154,14 +163,36 @@ class Server{
 
 int main(){
   try{
-    string msg;
+    string msg, dest_ip;
+    int port_in, port_out;
+
+    cout << "Escolha uma porta para enviar mensagens: ";
+    cin >> port_out;
+    cout << "Escolha uma porta para receber mensagens: ";
+    cin >> port_in;
+    cout << "Insira o IP do destino: ";
+    cin >> dest_ip;
+    getline(cin, msg);
+    cout << "Conversa iniciada." << endl;
+
     ChatHandler cHandler;
-    Client clt(4321, "127.0.0.1", cHandler);
-    Server svr(1234, cHandler);
+    Client clt(port_out, dest_ip, cHandler);
+    Server svr(port_in, cHandler);
     thread client(&Client::client_thread, &clt);
     thread server(&Server::server_thread, &svr);
-    while(getline(cin, msg)) clt.send(msg);
+
+    try{
+      while(getline(cin, msg)) clt.send(msg);
+    } catch(string s){
+      cout << s << endl;
+      clt.turn_off();
+      svr.turn_off();
+      client.join();
+      server.join();
+    }
+
   } catch(string s){
     cout << s << endl;
   }
+
 }
